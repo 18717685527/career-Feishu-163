@@ -141,8 +141,14 @@ def ingest(db, result):
     if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
         raise ValueError('results 必须为对象数组')
     ids = [r.get('message_id') for r in rows]
-    if len(ids) != len(set(ids)) or set(ids) != set(json.loads(batch['ids'])):
-        raise ValueError('结果必须完整覆盖当前批次且不可重复')
+    if not all(isinstance(value, str) for value in ids):
+        raise ValueError('模型结果包含无效邮件标识')
+    expected = set(json.loads(batch['ids']))
+    returned = set(ids)
+    if len(ids) != len(returned) or returned != expected:
+        raise ValueError('模型结果未完整覆盖批次（应答 %d/%d，缺少 %d，重复 %d，未知标识 %d）' %
+                         (len(ids), len(expected), len(expected - returned), len(ids) - len(returned),
+                          len(returned - expected)))
     validated = []
     for row in rows:
         if set(row) != {'message_id', 'relevant', 'reason', 'events'}:

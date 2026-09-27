@@ -28,6 +28,8 @@
 
 可选的模型分析使用 OpenAI 兼容接口。新增 `LLM_API_KEY` Secret，并在 GitHub Variables 设置 `LLM_BASE_URL`、`LLM_MODEL` 与 `LLM_PROVIDER`。例如 Agnes 使用 `LLM_BASE_URL=https://apihub.agnes-ai.com/v1`，并将 `LLM_PROVIDER` 设为 `agnes`；模型名以 Agnes 控制台显示的文本模型标识为准。
 
+云端模型每批最多分析 5 封候选邮件；若结果未逐封覆盖，运行会安全停止并只报告数量，不输出邮件内容。
+
 ## 本机配置
 
 1. 复制 `config.example.json` 为 `config.json`，或运行 `配置邮箱和飞书.cmd`。

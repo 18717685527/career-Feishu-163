@@ -118,7 +118,7 @@ class StoreTests(StoreFixture):
         self.add_mail('m1')
         result = self.result({'m1': [event()]})
         result['results'] *= 2
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, '应答 2/1，缺少 0，重复 1，未知标识 0'):
             ingest(self.db, result)
 
     def test_manual_override_and_notes_are_not_written(self):

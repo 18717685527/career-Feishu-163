@@ -137,7 +137,9 @@ def main():
                         accepted = 0
                         api_key = os.getenv('LLM_API_KEY') or os.getenv('OPENAI_API_KEY')
                         while db.execute('SELECT count(*) FROM messages WHERE analyzed=0').fetchone()[0]:
-                            prepared = prepare(db, 20)
+                            # Cloud models are more reliable when every result
+                            # can cover a small, bounded set of email IDs.
+                            prepared = prepare(db, 5)
                             if api_key:
                                 from .model import analyze as analyze_with_model
                                 accepted += ingest(db, analyze_with_model(prepared, api_key))
