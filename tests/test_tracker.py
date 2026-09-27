@@ -62,11 +62,33 @@ class StoreTests(StoreFixture):
         for i in ('m1', 'm2', 'm3', 'm4'):
             self.add_mail(i)
         other = dict(event(), role='后端开发')
-        unknown = dict(event(), recruitment='')
+        unknown = dict(event(), company='')
         ingest(self.db, self.result({'m1': [event()], 'm2': [other], 'm3': [unknown], 'm4': [unknown]}))
         apps = applications(self.db)
         self.assertEqual(len(apps), 4)
-        self.assertTrue(all(a['needs_review'] for a in apps if not a['recruitment']))
+        self.assertTrue(all(a['needs_review'] for a in apps if not a['company']))
+
+    def test_same_company_and_role_merge_across_batch_and_legal_suffix(self):
+        self.add_mail('m1')
+        self.add_mail('m2')
+        first = dict(event(), company='星云科技有限公司', recruitment='2027届秋招')
+        update = dict(event(), company='星云科技', recruitment='2028届春招',
+                      effective_at='2026-09-15T10:00:00+08:00', stage='待笔试')
+        ingest(self.db, self.result({'m1': [first], 'm2': [update]}))
+        apps = applications(self.db)
+        self.assertEqual(len(apps), 1)
+        self.assertEqual(apps[0]['stage'], '待笔试')
+
+    def test_new_event_reuses_legacy_record_identity(self):
+        self.add_mail('m1')
+        ingest(self.db, self.result({'m1': [dict(event(), company='星云科技有限公司')]}))
+        with self.db:
+            self.db.execute("UPDATE events SET application_id='legacy-record'")
+        self.add_mail('m2')
+        update = dict(event(), company='星云科技', recruitment='另一批次',
+                      effective_at='2026-09-15T10:00:00+08:00')
+        ingest(self.db, self.result({'m2': [update]}))
+        self.assertEqual([app['id'] for app in applications(self.db)], ['legacy-record'])
 
     def test_reschedule_and_old_mail_does_not_regress(self):
         self.add_mail('m1')

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -61,10 +62,39 @@ def set_meta(db, key, value):
     db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)', (key, json.dumps(value)))
 
 
+def _identity_text(value, company=False):
+    value = re.sub(r'[\W_]+', '', value.strip().casefold())
+    if company:
+        value = re.sub(r'(?:有限责任公司|股份有限公司|有限公司)$', '', value)
+    return value
+
+
+def application_identity(event):
+    """Return the conservative company/role identity used to group emails."""
+    return _identity_text(event['company'], company=True), _identity_text(event['role'])
+
+
+def same_application(left, right):
+    left_key, right_key = application_identity(left), application_identity(right)
+    return all(left_key) and left_key == right_key
+
+
 def application_id(event, message_id):
-    parts = [event[k].strip().casefold() for k in ('company', 'role', 'recruitment')]
-    # Missing identity is isolated, never merged into another unknown application.
+    parts = list(application_identity(event))
+    # Missing company or role is isolated, never merged into another unknown application.
     return digest(parts if all(parts) else parts + [message_id])[:32]
+
+
+def matching_application_id(db, event, pending=()):
+    """Prefer an existing (including legacy) record for the same company and role."""
+    matches = []
+    for row in db.execute('SELECT application_id, payload FROM events ORDER BY rowid'):
+        if row['application_id'] not in matches and same_application(json.loads(row['payload']), event):
+            matches.append(row['application_id'])
+    for row in pending:
+        if row[2] not in matches and same_application(json.loads(row[3]), event):
+            matches.append(row[2])
+    return matches[0] if matches else None
 
 
 def applications(db):
@@ -205,16 +235,15 @@ def ingest(db, result):
             if e['needs_review'] and not e['review_reason'].strip():
                 raise ValueError('待确认事件必须说明原因')
             e.update(subject=mail['subject'], received=mail['received'], sequence=index)
-            target = application_id(e, row['message_id'])
+            target = matching_application_id(db, e, validated) or application_id(e, row['message_id'])
             if 'application_ref' in e:
                 ref = e.pop('application_ref')
                 known = next((json.loads(v[3]) for v in validated if v[2] == ref), None)
                 if known is None:
                     record = db.execute('SELECT payload FROM events WHERE application_id=? LIMIT 1', (ref,)).fetchone()
                     known = json.loads(record[0]) if record else None
-                if not known or not e['company'].strip() or any(known[k].strip().casefold() != e[k].strip().casefold()
-                        for k in ('company', 'role', 'recruitment')):
-                    raise ValueError('application_ref 未知或与公司、岗位、批次不符')
+                if not known or not same_application(known, e):
+                    raise ValueError('application_ref 未知或与公司、岗位不符')
                 target = ref
             validated.append((digest([row['message_id'], index]), row['message_id'], target, json.dumps(e, ensure_ascii=False)))
     with db:
