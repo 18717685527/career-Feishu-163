@@ -352,6 +352,17 @@ class BackfillIMAP(FakeIMAP):
         raise AssertionError(criterion)
 
 
+class TrailingInternalDateIMAP(FakeIMAP):
+    def uid(self, command, *args):
+        self.commands.append((command, args))
+        if command == 'SEARCH':
+            return 'OK', [b'1']
+        return 'OK', [
+            (b'1 (UID 1 BODY[] {123}', RAW),
+            b' INTERNALDATE "14-Sep-2026 10:00:00 +0800")',
+        ]
+
+
 class MailTests(StoreFixture):
     def test_qq_address_selects_qq_imap_server(self):
         with patch.dict(os.environ, {'MAIL_IMAP_HOST': ''}):
@@ -432,6 +443,14 @@ class MailTests(StoreFixture):
 
         with self.assertRaisesRegex(ValueError, 'DD-Mon-YYYY'):
             backfill(self.db, {'email': 'user@qq.com'}, 'unused', '2026-08-15', MustNotConnect)
+
+    def test_fetch_accepts_internaldate_after_message_literal(self):
+        TrailingInternalDateIMAP.commands = []
+        result = fetch(self.db, {'email': 'user@qq.com'}, 'not-a-real-secret',
+                       10, TrailingInternalDateIMAP)
+        self.assertEqual(result, {'candidates': 1, 'scanned': 1, 'more': False})
+        received = self.db.execute('SELECT received FROM messages').fetchone()[0]
+        self.assertEqual(received, '2026-09-14T10:00:00+08:00')
 
     def test_html_removes_active_content(self):
         raw = RAW.replace(b'text/plain', b'text/html').replace(b'Please attend interview.',

@@ -159,11 +159,18 @@ def fetch(db, config, password, max_new=200, factory=imaplib.IMAP4_SSL):
                 if db.execute('SELECT 1 FROM seen WHERE folder=? AND validity=? AND uid=?', (folder, validity, uid)).fetchone():
                     continue
                 status, parts = client.uid('FETCH', str(uid), '(BODY.PEEK[] INTERNALDATE)')
-                tuples = [p for p in parts or [] if isinstance(p, tuple)]
-                if status != 'OK' or not tuples:
+                literals = [(index, part) for index, part in enumerate(parts or [])
+                            if isinstance(part, tuple) and len(part) >= 2]
+                if status != 'OK' or not literals:
                     raise RuntimeError('邮件读取失败，下次将从失败位置重试')
-                header, raw = tuples[0]
-                match = re.search(rb'INTERNALDATE "([^"]+)"', header)
+                literal_index, (header, raw) = literals[0]
+                metadata = [header]
+                for part in (parts or [])[literal_index + 1:]:
+                    if isinstance(part, tuple):
+                        break
+                    if isinstance(part, bytes):
+                        metadata.append(part)
+                match = re.search(rb'INTERNALDATE "([^"]+)"', b' '.join(metadata))
                 if not match:
                     raise RuntimeError('邮件缺少服务器收件时间')
                 received = datetime.strptime(match[1].decode(), '%d-%b-%Y %H:%M:%S %z').astimezone(TZ).isoformat()
