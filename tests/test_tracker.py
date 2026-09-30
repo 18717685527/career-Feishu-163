@@ -210,6 +210,62 @@ class StoreTests(StoreFixture):
                            FakeFeishu(), 10, fetcher=lambda *_: {'candidates': 0, 'scanned': 0, 'more': False})
         self.assertEqual(result['sync']['applications'], 0)
 
+    def test_invalid_model_event_schema_falls_back_to_rules_atomically(self):
+        self.add_mail('m1')
+        prepared = prepare(self.db, 5)
+        invalid = {'batch_id': prepared['batch_id'], 'results': [{
+            'message_id': 'm1', 'relevant': True, 'reason': '测试',
+            'events': [{'company': '示例公司', 'unexpected': 'field'}],
+        }]}
+        valid = {'batch_id': prepared['batch_id'], 'results': [{
+            'message_id': 'm1', 'relevant': True, 'reason': '本地规则降级',
+            'events': [event()],
+        }]}
+
+        accepted, fell_back = tracker_main.analyze_and_ingest(
+            self.db, prepared, 'test-key',
+            model_analyzer=lambda *_: invalid,
+            rule_analyzer=lambda *_: valid,
+        )
+
+        self.assertEqual(accepted, 1)
+        self.assertTrue(fell_back)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM events').fetchone()[0], 1)
+        application = applications(self.db)[0]
+        self.assertTrue(application['needs_review'])
+        self.assertIn('已用本地规则分析', application['review_reason'])
+        self.assertEqual(prepare(self.db)['messages'], [])
+
+    def test_valid_model_result_does_not_call_fallback(self):
+        self.add_mail('m1')
+        prepared = prepare(self.db, 5)
+        valid = {'batch_id': prepared['batch_id'], 'results': [{
+            'message_id': 'm1', 'relevant': True, 'reason': '模型分析', 'events': [event()],
+        }]}
+
+        accepted, fell_back = tracker_main.analyze_and_ingest(
+            self.db, prepared, 'test-key',
+            model_analyzer=lambda *_: valid,
+            rule_analyzer=lambda *_: self.fail('有效模型结果不应调用本地规则'),
+        )
+
+        self.assertEqual(accepted, 1)
+        self.assertFalse(fell_back)
+
+    def test_model_transport_failure_is_not_hidden_by_fallback(self):
+        self.add_mail('m1')
+        prepared = prepare(self.db, 5)
+
+        def failed_model(*_):
+            raise RuntimeError('模型请求失败')
+
+        with self.assertRaisesRegex(RuntimeError, '模型请求失败'):
+            tracker_main.analyze_and_ingest(
+                self.db, prepared, 'test-key',
+                model_analyzer=failed_model,
+                rule_analyzer=lambda *_: self.fail('连接错误不应被降级隐藏'),
+            )
+
 
 class FakeFeishu:
     def __init__(self):
@@ -482,3 +538,4 @@ class WorkflowTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

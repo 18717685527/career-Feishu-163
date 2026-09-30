@@ -84,6 +84,31 @@ def run_cycle(db, settings, password, api, max_new, fetcher=fetch):
     return {'fetch': fetched, 'sync': sync(db, api, settings)}
 
 
+def analyze_and_ingest(db, prepared, api_key, model_analyzer=None, rule_analyzer=None):
+    """Ingest one batch, conservatively falling back only on model schema drift."""
+    if rule_analyzer is None:
+        from .rules import analyze as rule_analyzer
+    if not api_key:
+        return ingest(db, rule_analyzer(prepared)), False
+    if model_analyzer is None:
+        from .model import analyze as model_analyzer
+
+    # Keep model transport/protocol failures visible. A ValueError here can only
+    # come from ingest's atomic validation of an already parsed model response.
+    modeled = model_analyzer(prepared, api_key)
+    try:
+        return ingest(db, modeled), False
+    except ValueError:
+        fallback = rule_analyzer(prepared)
+        marker = '模型结构不符合约定，已用本地规则分析'
+        for result in fallback.get('results', []):
+            for event in result.get('events', []):
+                event['needs_review'] = True
+                current = str(event.get('review_reason') or '').strip()
+                event['review_reason'] = '；'.join(value for value in (current, marker) if value)
+        return ingest(db, fallback), True
+
+
 def main():
     parser = argparse.ArgumentParser(description='QQ / 163 招聘邮件 / Codex / 飞书多维表格')
     subs = parser.add_subparsers(dest='command', required=True)
@@ -144,23 +169,25 @@ def main():
                     else:
                         if not get_meta(db, 'cloud_initialized', False):
                             raise RuntimeError('尚未完成云端初始化；请在 Actions 手动选择 bootstrap。该操作只保存游标，不处理历史邮件')
-                        from .rules import analyze
                         fetched = fetch(db, settings, credentials.get('imap_authorization'), 200)
                         accepted = 0
+                        fallback_batches = 0
                         api_key = model_api_key()
                         while db.execute('SELECT count(*) FROM messages WHERE analyzed=0').fetchone()[0]:
                             # Cloud models are more reliable when every result
                             # can cover a small, bounded set of email IDs.
                             prepared = prepare(db, 5)
-                            if api_key:
-                                from .model import analyze as analyze_with_model
-                                accepted += ingest(db, analyze_with_model(prepared, api_key))
-                            else:
-                                accepted += ingest(db, analyze(prepared))
+                            accepted_now, fell_back = analyze_and_ingest(db, prepared, api_key)
+                            accepted += accepted_now
+                            fallback_batches += int(fell_back)
                         synced = sync(db, api, settings)
                         save_cursors(db, api, settings)
+                        analysis_mode = os.getenv('LLM_PROVIDER', 'openai') if api_key else 'rules'
+                        if fallback_batches:
+                            analysis_mode += '+rules-fallback'
                         output = {'fetch': fetched, 'accepted_events': accepted, 'sync': synced,
-                                  'analysis_mode': os.getenv('LLM_PROVIDER', 'openai') if api_key else 'rules',
+                                  'analysis_mode': analysis_mode,
+                                  'model_fallback_batches': fallback_batches,
                                   'next': '再次运行以继续首轮回溯' if fetched['more'] else None}
                 elif args.command in ('fetch', 'run'):
                     if not 1 <= args.max_new <= 2000:
@@ -229,3 +256,4 @@ if __name__ == '__main__':
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
     sys.exit(main())
+
