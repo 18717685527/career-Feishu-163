@@ -1,6 +1,7 @@
 import email
 import imaplib
 import json
+import os
 import re
 import ssl
 from datetime import datetime
@@ -11,6 +12,33 @@ from html.parser import HTMLParser
 from .core import TZ, digest, get_meta, now, set_meta
 
 KEYWORDS = re.compile(r'招聘|应聘|投递|简历|笔试|面试|测评|校招|实习|录用|补充材料|人才|招聘进展|应届|入职|offer|interview|recruit|application|assessment|career|hiring|resume|candidate', re.I)
+IMAP_HOSTS = {'qq.com': 'imap.qq.com', '163.com': 'imap.163.com'}
+
+
+def imap_endpoint(config):
+    host = os.getenv('MAIL_IMAP_HOST', '').strip()
+    if not host:
+        address = config.get('email', '').strip()
+        domain = address.rsplit('@', 1)[-1].casefold() if '@' in address else ''
+        host = IMAP_HOSTS.get(domain)
+    if not host:
+        raise ValueError('无法识别邮箱 IMAP 服务器，请设置 MAIL_IMAP_HOST')
+    return host, 993
+
+
+def connect_imap(config, factory):
+    host, port = imap_endpoint(config)
+    client = factory(host, port, ssl_context=ssl.create_default_context(), timeout=30)
+    return client, host
+
+
+def send_netease_id(client, host):
+    if host.casefold() != 'imap.163.com':
+        return
+    capabilities = [c.upper() if isinstance(c, bytes) else c.upper().encode() for c in client.capabilities]
+    if b'ID' in capabilities:
+        imaplib.Commands.setdefault('ID', ('AUTH', 'SELECTED'))
+        client._simple_command('ID', '("name" "CodexCareerTracker" "version" "1.0")')
 
 
 class PlainHTML(HTMLParser):
@@ -91,14 +119,12 @@ def folder_names(client):
 
 
 def fetch(db, config, password, max_new=200, factory=imaplib.IMAP4_SSL):
-    client = factory('imap.163.com', 993, ssl_context=ssl.create_default_context(), timeout=30)
+    client, host = connect_imap(config, factory)
     count = scanned = 0
     try:
         client.login(config['email'], password)
         # NetEase may require IMAP ID before SELECT.
-        if b'ID' in [c.upper() if isinstance(c, bytes) else c.upper().encode() for c in client.capabilities]:
-            imaplib.Commands.setdefault('ID', ('AUTH', 'SELECTED'))
-            client._simple_command('ID', '("name" "CodexCareerTracker" "version" "1.0")')
+        send_netease_id(client, host)
         folders = config.get('folders') or folder_names(client)
         for folder in folders:
             status, _ = client.select(folder, readonly=True)
@@ -162,13 +188,11 @@ def fetch(db, config, password, max_new=200, factory=imaplib.IMAP4_SSL):
 
 def bootstrap(db, config, password, factory=imaplib.IMAP4_SSL):
     """Set cloud cursors to the mailbox head without processing old mail."""
-    client = factory('imap.163.com', 993, ssl_context=ssl.create_default_context(), timeout=30)
+    client, host = connect_imap(config, factory)
     folders_done = []
     try:
         client.login(config['email'], password)
-        if b'ID' in [c.upper() if isinstance(c, bytes) else c.upper().encode() for c in client.capabilities]:
-            imaplib.Commands.setdefault('ID', ('AUTH', 'SELECTED'))
-            client._simple_command('ID', '("name" "CodexCareerTracker" "version" "1.0")')
+        send_netease_id(client, host)
         for folder in config.get('folders') or folder_names(client):
             status, _ = client.select(folder, readonly=True)
             if status != 'OK':

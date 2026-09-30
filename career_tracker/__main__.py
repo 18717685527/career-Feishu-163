@@ -10,6 +10,13 @@ from .feishu import Feishu, initialize, sync
 from .mailbox import bootstrap, fetch
 
 
+def model_api_key():
+    dedicated = os.getenv('LLM_API_KEY')
+    if os.getenv('LLM_BASE_URL') and not dedicated:
+        raise RuntimeError('配置 LLM_BASE_URL 时必须同时配置专用 LLM_API_KEY')
+    return dedicated or os.getenv('OPENAI_API_KEY')
+
+
 def config():
     cloud_values = {
         'email': os.getenv('MAIL_ADDRESS'),
@@ -78,7 +85,7 @@ def run_cycle(db, settings, password, api, max_new, fetcher=fetch):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='163 招聘邮件 / Codex / 飞书多维表格')
+    parser = argparse.ArgumentParser(description='QQ / 163 招聘邮件 / Codex / 飞书多维表格')
     subs = parser.add_subparsers(dest='command', required=True)
     for name in ('status', 'doctor', 'init-feishu', 'sync', 'mark-ready', 'cloud-run', 'cloud-bootstrap'):
         subs.add_parser(name)
@@ -135,7 +142,7 @@ def main():
                         from .rules import analyze
                         fetched = fetch(db, settings, credentials.get('imap_authorization'), 200)
                         accepted = 0
-                        api_key = os.getenv('LLM_API_KEY') or os.getenv('OPENAI_API_KEY')
+                        api_key = model_api_key()
                         while db.execute('SELECT count(*) FROM messages WHERE analyzed=0').fetchone()[0]:
                             # Cloud models are more reliable when every result
                             # can cover a small, bounded set of email IDs.

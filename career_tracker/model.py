@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
@@ -52,10 +53,17 @@ def _json_content(value):
     return json.loads(value)
 
 
+def endpoint():
+    base_url = os.getenv('LLM_BASE_URL', 'https://api.openai.com/v1').rstrip('/')
+    parsed = urlparse(base_url)
+    if parsed.scheme != 'https' or not parsed.hostname:
+        raise RuntimeError('模型服务地址必须使用 HTTPS')
+    return base_url + '/chat/completions'
+
+
 def analyze(batch, api_key):
     # Chat Completions is the common subset implemented by OpenAI-compatible
     # providers, including Agnes. Core.ingest remains the final JSON validator.
-    base_url = os.getenv('LLM_BASE_URL', 'https://api.openai.com/v1').rstrip('/')
     system_prompt = (PROMPT + '\nReturn one JSON object only. Its shape must exactly match this JSON Schema:\n'
                      + json.dumps(SCHEMA, ensure_ascii=False, separators=(',', ':'))
                      + '\nFor stage, use only a value from batch.stages. Omit unknown optional fields; do not use null.')
@@ -68,7 +76,7 @@ def analyze(batch, api_key):
     if os.getenv('LLM_PROVIDER', '').casefold() not in ('agnes',):
         payload['response_format'] = {'type': 'json_object'}
     try:
-        request = Request(base_url + '/chat/completions', json.dumps(payload, ensure_ascii=False).encode(),
+        request = Request(endpoint(), json.dumps(payload, ensure_ascii=False).encode(),
                           {'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}, method='POST')
         with urlopen(request, timeout=90) as response:
             result = json.load(response)

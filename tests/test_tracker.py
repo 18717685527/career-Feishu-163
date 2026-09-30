@@ -1,14 +1,18 @@
 import copy
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+from career_tracker import mailbox
+from career_tracker import model
+from career_tracker import __main__ as tracker_main
 from career_tracker.core import connect, get_meta, ingest, prepare, applications, suppress_before, TZ
 from career_tracker.feishu import overview_fields, sync, index_records, FeishuError
-from career_tracker.mailbox import parse_message, fetch, folder_names
+from career_tracker.mailbox import parse_message, fetch, folder_names, bootstrap
 from career_tracker.model import SCHEMA, analyze as analyze_with_model
 from career_tracker.__main__ import run_cycle
 
@@ -229,6 +233,18 @@ class FakeFeishu:
 
 
 class ModelTests(unittest.TestCase):
+    def test_custom_model_endpoint_requires_dedicated_key(self):
+        environment = {'LLM_BASE_URL': 'https://model.example.test/v1',
+                       'OPENAI_API_KEY': 'openai-test-key'}
+        with patch.dict(os.environ, environment, clear=True):
+            with self.assertRaisesRegex(RuntimeError, 'LLM_API_KEY'):
+                tracker_main.model_api_key()
+
+    def test_model_endpoint_requires_https(self):
+        with patch.dict(os.environ, {'LLM_BASE_URL': 'http://model.example.test/v1'}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, 'HTTPS'):
+                model.endpoint()
+
     def test_model_request_includes_the_required_schema(self):
         class Response:
             def __enter__(self):
@@ -272,12 +288,17 @@ RAW = ('From: hr@example.com\r\nSubject: interview invitation\r\n'
 class FakeIMAP:
     capabilities = ()
     commands = []
+    connections = []
     fail_uid = None
 
-    def __init__(self, *args, **kwargs):
-        pass
+    def __init__(self, host, port, **kwargs):
+        self.connections.append((host, port))
 
     def login(self, *args):
+        return 'OK', []
+
+    def _simple_command(self, command, *args):
+        self.commands.append((command, args))
         return 'OK', []
 
     def list(self):
@@ -304,8 +325,39 @@ class FakeIMAP:
 
 
 class MailTests(StoreFixture):
+    def test_qq_address_selects_qq_imap_server(self):
+        with patch.dict(os.environ, {'MAIL_IMAP_HOST': ''}):
+            self.assertEqual(mailbox.imap_endpoint({'email': 'user@qq.com'}), ('imap.qq.com', 993))
+
+    def test_163_address_selects_netease_imap_server(self):
+        with patch.dict(os.environ, {'MAIL_IMAP_HOST': ''}):
+            self.assertEqual(mailbox.imap_endpoint({'email': 'user@163.com'}), ('imap.163.com', 993))
+
+    def test_environment_host_overrides_email_domain(self):
+        with patch.dict(os.environ, {'MAIL_IMAP_HOST': 'imap.example.test'}):
+            self.assertEqual(mailbox.imap_endpoint({'email': 'user@qq.com'}), ('imap.example.test', 993))
+
+    def test_imap_id_is_sent_only_to_netease(self):
+        FakeIMAP.capabilities = (b'ID',)
+        try:
+            with patch.dict(os.environ, {'MAIL_IMAP_HOST': ''}):
+                FakeIMAP.commands = []
+                FakeIMAP.connections = []
+                bootstrap(self.db, {'email': 'user@qq.com'}, 'not-a-real-secret', FakeIMAP)
+                self.assertEqual(FakeIMAP.connections, [('imap.qq.com', 993)])
+                self.assertFalse(any(command == 'ID' for command, _ in FakeIMAP.commands))
+
+                FakeIMAP.commands = []
+                FakeIMAP.connections = []
+                bootstrap(self.db, {'email': 'user@163.com'}, 'not-a-real-secret', FakeIMAP)
+                self.assertEqual(FakeIMAP.connections, [('imap.163.com', 993)])
+                self.assertTrue(any(command == 'ID' for command, _ in FakeIMAP.commands))
+        finally:
+            FakeIMAP.capabilities = ()
+
     def test_readonly_and_duplicate_mail_and_catchup(self):
         FakeIMAP.commands = []
+        FakeIMAP.connections = []
         FakeIMAP.fail_uid = None
         result = fetch(self.db, {'email': 'user@163.com'}, 'not-a-real-secret', 1, FakeIMAP)
         self.assertTrue(result['more'])
@@ -342,6 +394,15 @@ class MailTests(StoreFixture):
     def test_duplicate_remote_keys_stop_sync(self):
         with self.assertRaises(FeishuError):
             index_records([{'fields': {'同步键': 'x'}}, {'fields': {'同步键': 'x'}}])
+
+
+class WorkflowTests(unittest.TestCase):
+    def test_secret_bearing_workflow_pins_actions_and_protects_destinations(self):
+        workflow = (Path(__file__).parents[1] / '.github/workflows/career-tracker.yml').read_text(encoding='utf-8')
+        self.assertIn('actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803', workflow)
+        self.assertIn('actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1', workflow)
+        self.assertIn("MAIL_IMAP_HOST: ${{ secrets.MAIL_IMAP_HOST }}", workflow)
+        self.assertIn("LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}", workflow)
 
 
 if __name__ == '__main__':

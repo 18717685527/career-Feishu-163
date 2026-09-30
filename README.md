@@ -1,6 +1,6 @@
-# 163 求职邮件跟踪器
+# 163 / QQ 求职邮件跟踪器
 
-只读扫描 163 邮箱中的招聘邮件，并同步到飞书多维表格。既可在本机由 Codex 辅助分析，也可由 GitHub Actions 每日无人值守运行。
+只读扫描 163 或 QQ 邮箱中的招聘邮件，并同步到飞书多维表格。既可在本机由 Codex 辅助分析，也可由 GitHub Actions 每日无人值守运行。
 
 ## 功能
 
@@ -16,17 +16,18 @@
 - Windows 10/11（授权码保存到 Windows Credential Manager）
 - Python 3.10+
 - 已安装并登录、且拥有飞书多维表格读写权限的 `lark-cli`
-- 已启用 IMAP 的 163 邮箱及客户端授权码
+- 已启用 IMAP 的 163 或 QQ 邮箱及客户端授权码（不是邮箱登录密码）
 
 ## GitHub Actions 无人值守运行
 
 1. 在飞书开放平台创建并发布自建应用，授予目标 Base 的读写权限，并把应用加入该 Base 的可编辑协作者。
-2. 在 GitHub 仓库 `Settings → Secrets and variables → Actions` 配置：`MAIL_ADDRESS`、`MAIL_AUTH_CODE`、`FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_APP_TOKEN`、`FEISHU_NOTIFY_WEBHOOK`。
+2. 在 GitHub 仓库 `Settings → Secrets and variables → Actions` 配置必需 Secrets：`MAIL_ADDRESS`、`MAIL_AUTH_CODE`、`FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_APP_TOKEN`。`FEISHU_NOTIFY_WEBHOOK`、`LLM_API_KEY`（或默认 OpenAI 地址使用的 `OPENAI_API_KEY`）、`MAIL_IMAP_HOST`、`LLM_BASE_URL` 为可选 Secrets。
+   可选 Variables 包括 `LLM_MODEL`、`LLM_PROVIDER` 和兼容旧配置的 `OPENAI_MODEL`。通常不设置 `MAIL_IMAP_HOST`：`@qq.com` 自动使用 `imap.qq.com:993`，`@163.com` 自动使用 `imap.163.com:993`；仅自定义服务器时覆盖。配置自定义 `LLM_BASE_URL` 时必须使用单独的 `LLM_API_KEY`，且地址必须为 HTTPS。
 3. 已有表格内容时，首次手动运行选择 `bootstrap`。它只保存每个文件夹当前的 IMAP 游标，不读取或写入历史应聘记录。之后定时任务只读取新增邮件；需要手动补跑时选择 `sync`。
 
-工作流每天北京时间约 20:07 运行。飞书会新增“系统状态”表，仅保存 IMAP 游标；应聘总览仍维持四个展示字段。运行日志只输出汇总，不输出邮件正文或密钥。
+工作流每天北京时间 20:00 运行。飞书会新增“系统状态”表，仅保存 IMAP 游标；应聘总览仍维持四个展示字段。运行日志只输出汇总，不输出邮件正文或密钥。
 
-可选的模型分析使用 OpenAI 兼容接口。新增 `LLM_API_KEY` Secret，并在 GitHub Variables 设置 `LLM_BASE_URL`、`LLM_MODEL` 与 `LLM_PROVIDER`。例如 Agnes 使用 `LLM_BASE_URL=https://apihub.agnes-ai.com/v1`，并将 `LLM_PROVIDER` 设为 `agnes`；模型名以 Agnes 控制台显示的文本模型标识为准。
+可选的模型分析使用 OpenAI 兼容接口。新增 `LLM_API_KEY` 和 `LLM_BASE_URL` Secrets，并在 GitHub Variables 设置 `LLM_MODEL` 与 `LLM_PROVIDER`。例如 Agnes 使用 `LLM_BASE_URL=https://apihub.agnes-ai.com/v1`，并将 `LLM_PROVIDER` 设为 `agnes`；模型名以 Agnes 控制台显示的文本模型标识为准。
 
 云端模型每批最多分析 5 封候选邮件；若结果未逐封覆盖，运行会安全停止并只报告数量，不输出邮件内容。
 
@@ -35,7 +36,7 @@
 ## 本机配置
 
 1. 复制 `config.example.json` 为 `config.json`，或运行 `配置邮箱和飞书.cmd`。
-2. 在 163 邮箱开启 IMAP，并将客户端授权码填入本机配置窗口。
+2. 在邮箱中开启 IMAP，并使用客户端授权码；QQ 邮箱必须使用 QQ 生成的授权码，不能使用登录密码。
 3. 登录 `lark-cli`，授权目标飞书账号访问多维表格。
 4. 运行以下命令完成连通性和建表验证：
 

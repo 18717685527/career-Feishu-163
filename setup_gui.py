@@ -1,12 +1,12 @@
 """Run locally; masked secret fields write directly to Windows Credential Manager."""
 import json
-import re
 import tkinter as tk
 from tkinter import messagebox, ttk
 from urllib.parse import urlparse
 
 from career_tracker import credentials
 from career_tracker.core import ROOT, connect, save_json, set_meta
+from career_tracker.mailbox import imap_endpoint
 
 
 def main():
@@ -19,7 +19,7 @@ def main():
     panel = ttk.Frame(root, padding=20)
     panel.pack(fill='both', expand=True)
     ttk.Label(panel, text='凭据直接保存到 Windows 凭据管理器，不会发送到聊天。').grid(row=0, column=0, columnspan=2, sticky='w', pady=10)
-    definitions = [('email', '163 邮箱地址', False), ('imap_authorization', '163 客户端授权码', True)]
+    definitions = [('email', 'QQ / 163 邮箱地址', False), ('imap_authorization', '邮箱客户端授权码', True)]
     entries = {}
     for row, (key, label, secret) in enumerate(definitions, 1):
         ttk.Label(panel, text=label).grid(row=row, column=0, sticky='w', pady=10)
@@ -32,8 +32,10 @@ def main():
 
     def save():
         values = {k: e.get().strip() for k, e in entries.items()}
-        if not re.fullmatch(r'[^\s@]+@163\.com', values['email'], re.I):
-            messagebox.showerror('配置错误', '请输入有效的 @163.com 邮箱地址。')
+        try:
+            imap_endpoint({'email': values['email']})
+        except ValueError:
+            messagebox.showerror('配置错误', '请输入有效的 @qq.com / @163.com 邮箱地址，或设置 MAIL_IMAP_HOST。')
             return
         if old and old.get('email') != values['email']:
             messagebox.showerror('配置错误', '当前项目已绑定另一邮箱；请使用独立项目。')
