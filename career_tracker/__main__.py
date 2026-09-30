@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from . import credentials
 from .core import ROOT, applications, connect, get_meta, ingest, now, prepare, save_json, set_meta
 from .feishu import Feishu, initialize, sync
-from .mailbox import bootstrap, fetch
+from .mailbox import backfill, bootstrap, fetch
 
 
 def model_api_key():
@@ -87,7 +87,8 @@ def run_cycle(db, settings, password, api, max_new, fetcher=fetch):
 def main():
     parser = argparse.ArgumentParser(description='QQ / 163 招聘邮件 / Codex / 飞书多维表格')
     subs = parser.add_subparsers(dest='command', required=True)
-    for name in ('status', 'doctor', 'init-feishu', 'sync', 'mark-ready', 'cloud-run', 'cloud-bootstrap'):
+    for name in ('status', 'doctor', 'init-feishu', 'sync', 'mark-ready',
+                 'cloud-run', 'cloud-bootstrap', 'cloud-backfill'):
         subs.add_parser(name)
     collect = subs.add_parser('fetch')
     collect.add_argument('--max-new', type=int, default=200)
@@ -128,12 +129,16 @@ def main():
                 output = {'ready': True, 'next': '让 Codex 启用已暂停的“求职邮件跟踪”定时任务'}
             else:
                 settings = config()
-                if args.command in ('cloud-run', 'cloud-bootstrap'):
+                if args.command in ('cloud-run', 'cloud-bootstrap', 'cloud-backfill'):
                     from .cloud import restore, save_cursors
                     api = Feishu(settings, credentials.get('feishu_secret'))
                     initialize(api, settings)
                     restore(db, api, settings)
-                    if args.command == 'cloud-bootstrap':
+                    if args.command == 'cloud-backfill':
+                        output = backfill(db, settings, credentials.get('imap_authorization'),
+                                          os.getenv('BACKFILL_SINCE', '').strip())
+                        save_cursors(db, api, settings)
+                    elif args.command == 'cloud-bootstrap':
                         output = bootstrap(db, settings, credentials.get('imap_authorization'))
                         save_cursors(db, api, settings)
                     else:

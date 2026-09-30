@@ -217,3 +217,61 @@ def bootstrap(db, config, password, factory=imaplib.IMAP4_SSL):
             client.logout()
         except Exception:
             pass
+
+
+def validate_since(value):
+    if not isinstance(value, str) or not re.fullmatch(r'\d{2}-[A-Za-z]{3}-\d{4}', value):
+        raise ValueError('回溯日期须为 DD-Mon-YYYY，例如 15-Aug-2026')
+    try:
+        datetime.strptime(value, '%d-%b-%Y')
+    except ValueError:
+        raise ValueError('回溯日期须为 DD-Mon-YYYY，例如 15-Aug-2026') from None
+    return value
+
+
+def backfill(db, config, password, since, factory=imaplib.IMAP4_SSL):
+    """Position every cloud cursor immediately before the requested date."""
+    since = validate_since(since)
+    client, host = connect_imap(config, factory)
+    cursors = []
+    messages_in_range = 0
+    try:
+        client.login(config['email'], password)
+        send_netease_id(client, host)
+        for folder in config.get('folders') or folder_names(client):
+            status, _ = client.select(folder, readonly=True)
+            if status != 'OK':
+                raise RuntimeError('无法只读打开邮箱文件夹；请检查 IMAP 客户端授权')
+            response = client.response('UIDVALIDITY')[1]
+            if not response or not response[0]:
+                raise RuntimeError('邮箱未提供 UIDVALIDITY')
+            status, data = client.uid('SEARCH', None, 'SINCE ' + since)
+            if status != 'OK':
+                raise RuntimeError('邮件回溯检索失败')
+            selected = sorted(int(value) for value in (data[0] or b'').split())
+            messages_in_range += len(selected)
+            if selected:
+                cursor_uid = selected[0] - 1
+            else:
+                status, all_data = client.uid('SEARCH', None, 'ALL')
+                if status != 'OK':
+                    raise RuntimeError('邮件检索失败')
+                all_uids = [int(value) for value in (all_data[0] or b'').split()]
+                cursor_uid = max(all_uids, default=0)
+            cursors.append(('cursor:' + folder,
+                            {'validity': response[0].decode(), 'uid': cursor_uid}))
+        with db:
+            for key, value in cursors:
+                set_meta(db, key, value)
+            set_meta(db, 'initial_since', since)
+            set_meta(db, 'cloud_initialized', True)
+            set_meta(db, 'last_fetch_success', now())
+        return {'since': since, 'folders': len(cursors),
+                'messages_in_range': messages_in_range,
+                'processed_messages': 0,
+                'next': '运行 sync 分批读取回溯范围内的邮件'}
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass

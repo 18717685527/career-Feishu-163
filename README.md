@@ -24,12 +24,15 @@
 2. 在 GitHub 仓库 `Settings → Secrets and variables → Actions` 配置必需 Secrets：`MAIL_ADDRESS`、`MAIL_AUTH_CODE`、`FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_APP_TOKEN`。`FEISHU_NOTIFY_WEBHOOK`、`LLM_API_KEY`（或默认 OpenAI 地址使用的 `OPENAI_API_KEY`）、`MAIL_IMAP_HOST`、`LLM_BASE_URL` 为可选 Secrets。
    可选 Variables 包括 `LLM_MODEL`、`LLM_PROVIDER` 和兼容旧配置的 `OPENAI_MODEL`。通常不设置 `MAIL_IMAP_HOST`：`@qq.com` 自动使用 `imap.qq.com:993`，`@163.com` 自动使用 `imap.163.com:993`；仅自定义服务器时覆盖。配置自定义 `LLM_BASE_URL` 时必须使用单独的 `LLM_API_KEY`，且地址必须为 HTTPS。
 3. 已有表格内容时，首次手动运行选择 `bootstrap`。它只保存每个文件夹当前的 IMAP 游标，不读取或写入历史应聘记录。之后定时任务只读取新增邮件；需要手动补跑时选择 `sync`。
+4. 需要导入历史邮件时，手动选择 `backfill` 并填写 `DD-Mon-YYYY` 日期。它只回退所有文件夹的只读游标，不读取正文。随后反复运行 `sync`，直到日志中的 `fetch.more` 为 `false`。不要在回溯后再次运行 `bootstrap`，否则游标会重新移动到邮箱末尾。
 
 工作流每天北京时间 20:00 运行。飞书会新增“系统状态”表，仅保存 IMAP 游标；应聘总览仍维持四个展示字段。运行日志只输出汇总，不输出邮件正文或密钥。
 
 可选的模型分析使用 OpenAI 兼容接口。新增 `LLM_API_KEY` 和 `LLM_BASE_URL` Secrets，并在 GitHub Variables 设置 `LLM_MODEL` 与 `LLM_PROVIDER`。例如 Agnes 使用 `LLM_BASE_URL=https://apihub.agnes-ai.com/v1`，并将 `LLM_PROVIDER` 设为 `agnes`；模型名以 Agnes 控制台显示的文本模型标识为准。
 
 云端模型每批最多分析 5 封候选邮件；若结果未逐封覆盖，运行会安全停止并只报告数量，不输出邮件内容。
+
+`backfill` 的日期不是 Secret。回溯日志只显示日期、文件夹数和范围内邮件数量；邮件正文仅在后续 `sync` 中通过招聘关键词筛选后交给规则或已配置的模型分析。
 
 同一公司、同一岗位的后续邮件会自动更新同一条应聘记录；招聘批次差异和公司名末尾的“有限公司”等不会拆分记录。不同岗位仍保持独立。
 

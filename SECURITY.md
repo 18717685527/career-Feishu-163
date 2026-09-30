@@ -5,6 +5,7 @@ This project reads recruitment emails locally and may store their contents in `d
 - Do not commit `config.json`, `data/`, QR images, mailbox exports, or database files.
 - On Windows, the 163 or QQ IMAP authorization code is stored in Windows Credential Manager. In GitHub Actions it is supplied through repository Secrets. Use a provider-generated client authorization code, never the mailbox login password. Do not place either value in source code, issue reports, logs, or screenshots.
 - Feishu access may use a locally authenticated `lark-cli` or a self-built app supplied through GitHub Secrets; no token or app secret should be committed.
+- The GitHub Actions `backfill` date is not a secret. Backfill only positions read-only IMAP cursors and logs aggregate counts; it does not fetch or log message bodies. Candidate message content is fetched only by a later `sync` and is sent to a configured model provider when model analysis is enabled.
 - Before publishing, run `git status --ignored` and confirm that local configuration and runtime data are excluded.
 
 Please report a suspected security issue privately to the repository maintainer. Do not include credentials or unredacted email content in the report.

@@ -7,13 +7,19 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: '首次部署请选择 bootstrap；之后手动补跑请选择 sync'
+        description: '首次部署选 bootstrap；历史回溯选 backfill；手动补跑选 sync'
         required: true
         default: bootstrap
         type: choice
         options:
           - bootstrap
+          - backfill
           - sync
+      since:
+        description: 'backfill 起始日期，格式 DD-Mon-YYYY'
+        required: false
+        default: '15-Aug-2026'
+        type: string
 
 permissions:
   contents: read
@@ -35,11 +41,14 @@ jobs:
         run: |
           if [ "$RUN_MODE" = "bootstrap" ]; then
             python -m career_tracker cloud-bootstrap
+          elif [ "$RUN_MODE" = "backfill" ]; then
+            python -m career_tracker cloud-backfill
           else
             python -m career_tracker cloud-run
           fi
         env:
           RUN_MODE: ${{ github.event.inputs.mode || 'sync' }}
+          BACKFILL_SINCE: ${{ github.event.inputs.since }}
           MAIL_ADDRESS: ${{ secrets.MAIL_ADDRESS }}
           MAIL_AUTH_CODE: ${{ secrets.MAIL_AUTH_CODE }}
           MAIL_IMAP_HOST: ${{ secrets.MAIL_IMAP_HOST }}

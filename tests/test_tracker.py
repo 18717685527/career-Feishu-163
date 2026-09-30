@@ -12,7 +12,7 @@ from career_tracker import model
 from career_tracker import __main__ as tracker_main
 from career_tracker.core import connect, get_meta, ingest, prepare, applications, suppress_before, TZ
 from career_tracker.feishu import overview_fields, sync, index_records, FeishuError
-from career_tracker.mailbox import parse_message, fetch, folder_names, bootstrap
+from career_tracker.mailbox import parse_message, fetch, folder_names, bootstrap, backfill
 from career_tracker.model import SCHEMA, analyze as analyze_with_model
 from career_tracker.__main__ import run_cycle
 
@@ -324,6 +324,34 @@ class FakeIMAP:
         pass
 
 
+class BackfillIMAP(FakeIMAP):
+    capabilities = ()
+    current_folder = None
+
+    def list(self):
+        return 'OK', [b'(\\HasNoChildren) "/" "INBOX"',
+                      b'(\\HasNoChildren) "/" "Applications"']
+
+    def select(self, folder, readonly=False):
+        self.current_folder = folder
+        self.commands.append(('select', readonly))
+        return 'OK', [b'2']
+
+    def response(self, key):
+        return key, [b'9' if self.current_folder == '"INBOX"' else b'12']
+
+    def uid(self, command, *args):
+        self.commands.append((command, args))
+        if command != 'SEARCH':
+            raise AssertionError('backfill 不应读取邮件正文')
+        criterion = args[-1]
+        if criterion == 'SINCE 15-Aug-2026':
+            return ('OK', [b'10 12']) if self.current_folder == '"INBOX"' else ('OK', [b''])
+        if criterion == 'ALL':
+            return ('OK', [b'1 10 12']) if self.current_folder == '"INBOX"' else ('OK', [b'2 4'])
+        raise AssertionError(criterion)
+
+
 class MailTests(StoreFixture):
     def test_qq_address_selects_qq_imap_server(self):
         with patch.dict(os.environ, {'MAIL_IMAP_HOST': ''}):
@@ -383,6 +411,28 @@ class MailTests(StoreFixture):
         finally:
             FakeIMAP.fail_uid = None
 
+    def test_backfill_positions_every_folder_without_reading_messages(self):
+        BackfillIMAP.commands = []
+        with patch.dict(os.environ, {'MAIL_IMAP_HOST': ''}):
+            result = backfill(self.db, {'email': 'user@qq.com'}, 'not-a-real-secret',
+                              '15-Aug-2026', BackfillIMAP)
+        self.assertEqual(result['folders'], 2)
+        self.assertEqual(result['messages_in_range'], 2)
+        self.assertEqual(get_meta(self.db, 'cursor:"INBOX"'), {'validity': '9', 'uid': 9})
+        self.assertEqual(get_meta(self.db, 'cursor:"Applications"'), {'validity': '12', 'uid': 4})
+        self.assertEqual(get_meta(self.db, 'initial_since'), '15-Aug-2026')
+        self.assertTrue(get_meta(self.db, 'cloud_initialized'))
+        self.assertFalse(any(command == 'FETCH' for command, _ in BackfillIMAP.commands))
+        self.assertTrue(all(value is True for command, value in BackfillIMAP.commands if command == 'select'))
+
+    def test_backfill_rejects_invalid_date_before_connecting(self):
+        class MustNotConnect:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError('invalid date must fail before IMAP connection')
+
+        with self.assertRaisesRegex(ValueError, 'DD-Mon-YYYY'):
+            backfill(self.db, {'email': 'user@qq.com'}, 'unused', '2026-08-15', MustNotConnect)
+
     def test_html_removes_active_content(self):
         raw = RAW.replace(b'text/plain', b'text/html').replace(b'Please attend interview.',
                     b'<style>secret</style><p>interview</p><script>steal()</script>')
@@ -403,6 +453,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1', workflow)
         self.assertIn("MAIL_IMAP_HOST: ${{ secrets.MAIL_IMAP_HOST }}", workflow)
         self.assertIn("LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}", workflow)
+        self.assertIn('- backfill', workflow)
+        self.assertIn("default: '15-Aug-2026'", workflow)
+        self.assertIn('python -m career_tracker cloud-backfill', workflow)
+        self.assertIn("BACKFILL_SINCE: ${{ github.event.inputs.since }}", workflow)
+        self.assertIn("- cron: '0 12 * * *'", workflow)
+        self.assertIn('workflow_dispatch:', workflow)
 
 
 if __name__ == '__main__':
