@@ -30,7 +30,7 @@
 
 可选的模型分析使用 OpenAI 兼容接口。新增 `LLM_API_KEY` 和 `LLM_BASE_URL` Secrets，并在 GitHub Variables 设置 `LLM_MODEL` 与 `LLM_PROVIDER`。例如 Agnes 使用 `LLM_BASE_URL=https://apihub.agnes-ai.com/v1`，并将 `LLM_PROVIDER` 设为 `agnes`；模型名以 Agnes 控制台显示的文本模型标识为准。
 
-云端模型每批最多分析 5 封候选邮件。模型连接或协议失败时运行会安全停止；模型已返回但结构校验失败时，该批次改用保守本地规则、统一标记为待确认，并在日志中只报告 `model_fallback_batches` 数量，不输出邮件内容或模型原始响应。
+云端模型每批最多分析 5 封候选邮件。模型连接、鉴权或 HTTP 协议失败时运行会安全停止；模型服务已响应但内容无法解析或结构校验失败时，该批次改用保守本地规则、统一标记为待确认，且不会改变既有应聘阶段、下一步或日期。日志只报告 `model_fallback_batches` 数量，不输出邮件内容或模型原始响应。历史回溯可能包含多个模型批次，Actions 允许最多运行 90 分钟，但只按实际耗时执行。
 
 `backfill` 的日期不是 Secret。回溯日志只显示日期、文件夹数和范围内邮件数量；邮件正文仅在后续 `sync` 中通过招聘关键词筛选后交给规则或已配置的模型分析。
 

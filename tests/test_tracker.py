@@ -6,6 +6,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 from career_tracker import mailbox
 from career_tracker import model
@@ -266,6 +267,74 @@ class StoreTests(StoreFixture):
                 rule_analyzer=lambda *_: self.fail('连接错误不应被降级隐藏'),
             )
 
+    def test_unparseable_model_output_falls_back_to_rules(self):
+        self.add_mail('m1')
+        prepared = prepare(self.db, 5)
+        valid = {'batch_id': prepared['batch_id'], 'results': [{
+            'message_id': 'm1', 'relevant': True, 'reason': '本地规则降级', 'events': [event()],
+        }]}
+
+        def malformed_model(*_):
+            raise model.ModelOutputError('模型内容不是有效 JSON')
+
+        accepted, fell_back = tracker_main.analyze_and_ingest(
+            self.db, prepared, 'test-key',
+            model_analyzer=malformed_model,
+            rule_analyzer=lambda *_: valid,
+        )
+
+        self.assertEqual(accepted, 1)
+        self.assertTrue(fell_back)
+        application = applications(self.db)[0]
+        self.assertTrue(application['needs_review'])
+        self.assertEqual(application['stage'], '待确认')
+        self.assertEqual(application['next_action'], '')
+        self.assertIsNone(application['interview_at'])
+
+    def test_real_model_parse_error_uses_rules_fallback(self):
+        self.add_mail('m1')
+        prepared = prepare(self.db, 5)
+        fallback = {'batch_id': prepared['batch_id'], 'results': [{
+            'message_id': 'm1', 'relevant': True, 'reason': '本地规则降级', 'events': [event()],
+        }]}
+        response = {'choices': [{'message': {'content': 'not-json'}}]}
+
+        with patch('career_tracker.model.urlopen', return_value=FakeModelResponse()), \
+                patch('career_tracker.model.json.load', return_value=response):
+            accepted, fell_back = tracker_main.analyze_and_ingest(
+                self.db, prepared, 'test-key', model_analyzer=model.analyze,
+                rule_analyzer=lambda *_: fallback,
+            )
+
+        self.assertEqual(accepted, 1)
+        self.assertTrue(fell_back)
+        self.assertEqual(applications(self.db)[0]['stage'], '待确认')
+
+    def test_model_fallback_preserves_existing_application_state(self):
+        self.add_mail('m0')
+        ingest(self.db, self.result({'m0': [event()]}))
+        self.add_mail('m1')
+        prepared = prepare(self.db, 5)
+        rejected = dict(event(), event='收到淘汰通知', stage='已拒绝', next_action='已淘汰',
+                        deadline='2026-09-20T10:00:00+08:00', interview_at=None)
+        fallback = {'batch_id': prepared['batch_id'], 'results': [{
+            'message_id': 'm1', 'relevant': True, 'reason': '本地规则降级', 'events': [rejected],
+        }]}
+
+        accepted, fell_back = tracker_main.analyze_and_ingest(
+            self.db, prepared, 'test-key',
+            model_analyzer=lambda *_: (_ for _ in ()).throw(model.ModelOutputError('invalid')),
+            rule_analyzer=lambda *_: fallback,
+        )
+
+        application = applications(self.db)[0]
+        self.assertEqual(accepted, 1)
+        self.assertTrue(fell_back)
+        self.assertEqual(application['stage'], '待面试')
+        self.assertEqual(application['next_action'], '参加面试')
+        self.assertEqual(application['interview_at'], '2026-09-16T15:00:00+08:00')
+        self.assertIsNone(application['deadline'])
+
 
 class FakeFeishu:
     def __init__(self):
@@ -288,6 +357,14 @@ class FakeFeishu:
         return row['record_id']
 
 
+class FakeModelResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
 class ModelTests(unittest.TestCase):
     def test_custom_model_endpoint_requires_dedicated_key(self):
         environment = {'LLM_BASE_URL': 'https://model.example.test/v1',
@@ -302,15 +379,8 @@ class ModelTests(unittest.TestCase):
                 model.endpoint()
 
     def test_model_request_includes_the_required_schema(self):
-        class Response:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
         result = {'choices': [{'message': {'content': '{"batch_id":"batch","results":[]}'}}]}
-        with patch('career_tracker.model.urlopen', return_value=Response()) as request, \
+        with patch('career_tracker.model.urlopen', return_value=FakeModelResponse()) as request, \
                 patch('career_tracker.model.json.load', return_value=result):
             self.assertEqual(analyze_with_model({'batch_id': 'batch', 'messages': [], 'stages': []}, 'test-key'),
                              {'batch_id': 'batch', 'results': []})
@@ -320,20 +390,63 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(SCHEMA['type'], 'object')
 
     def test_agnes_request_uses_documented_compatibility_subset(self):
-        class Response:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
         result = {'choices': [{'message': {'content': '{"batch_id":"batch","results":[]}'}}]}
         with patch.dict('career_tracker.model.os.environ', {'LLM_PROVIDER': 'agnes'}, clear=False), \
-                patch('career_tracker.model.urlopen', return_value=Response()) as request, \
+                patch('career_tracker.model.urlopen', return_value=FakeModelResponse()) as request, \
                 patch('career_tracker.model.json.load', return_value=result):
             analyze_with_model({'batch_id': 'batch', 'messages': [], 'stages': []}, 'test-key')
         body = json.loads(request.call_args.args[0].data)
         self.assertNotIn('response_format', body)
+
+    def test_malformed_model_content_raises_output_error(self):
+        result = {'choices': [{'message': {'content': 'not-json'}}]}
+        with patch('career_tracker.model.urlopen', return_value=FakeModelResponse()), \
+                patch('career_tracker.model.json.load', return_value=result):
+            with self.assertRaises(model.ModelOutputError):
+                analyze_with_model({'batch_id': 'batch', 'messages': [], 'stages': []}, 'test-key')
+
+    def test_invalid_segmented_model_content_raises_output_error(self):
+        for content in ([], [{'type': 'text'}], [{'type': 'text', 'text': None}],
+                        [{'type': 'text', 'text': 7}]):
+            with self.subTest(content=content), \
+                    patch('career_tracker.model.urlopen', return_value=FakeModelResponse()), \
+                    patch('career_tracker.model.json.load', return_value={
+                        'choices': [{'message': {'content': content}}]
+                    }):
+                with self.assertRaises(model.ModelOutputError):
+                    analyze_with_model({'batch_id': 'batch', 'messages': [], 'stages': []}, 'test-key')
+
+    def test_valid_segmented_model_content_is_joined_in_order(self):
+        response = {'choices': [{'message': {'content': [
+            {'type': 'text', 'text': '{"batch_id":"batch",'},
+            {'type': 'text', 'text': '"results":[]}'},
+        ]}}]}
+        with patch('career_tracker.model.urlopen', return_value=FakeModelResponse()), \
+                patch('career_tracker.model.json.load', return_value=response):
+            result = analyze_with_model({'batch_id': 'batch', 'messages': [], 'stages': []}, 'test-key')
+        self.assertEqual(result, {'batch_id': 'batch', 'results': []})
+
+    def test_missing_model_response_fields_raise_output_error(self):
+        responses = (None, {}, {'choices': []}, {'choices': [{}]},
+                     {'choices': [{'message': None}]},
+                     {'choices': [{'message': {}}]},
+                     {'choices': [{'message': {'content': None}}]})
+        for response in responses:
+            with self.subTest(response=response), \
+                    patch('career_tracker.model.urlopen', return_value=FakeModelResponse()), \
+                    patch('career_tracker.model.json.load', return_value=response):
+                with self.assertRaises(model.ModelOutputError):
+                    analyze_with_model({'batch_id': 'batch', 'messages': [], 'stages': []}, 'test-key')
+
+    def test_transport_errors_remain_service_errors(self):
+        errors = ((HTTPError('https://model.example.test', 401, 'unauthorized', {}, None), 'HTTP 401'),
+                  (URLError('offline'), '网络连接失败'), (TimeoutError(), '网络连接失败'))
+        for error, message in errors:
+            with self.subTest(error=type(error).__name__), \
+                    patch('career_tracker.model.urlopen', side_effect=error):
+                with self.assertRaisesRegex(RuntimeError, message) as caught:
+                    analyze_with_model({'batch_id': 'batch', 'messages': [], 'stages': []}, 'test-key')
+                self.assertNotIsInstance(caught.exception, model.ModelOutputError)
 
 
 RAW = ('From: hr@example.com\r\nSubject: interview invitation\r\n'
@@ -532,6 +645,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("default: '15-Aug-2026'", workflow)
         self.assertIn('python -m career_tracker cloud-backfill', workflow)
         self.assertIn("BACKFILL_SINCE: ${{ github.event.inputs.since }}", workflow)
+        self.assertRegex(workflow, r'(?m)^  sync:\n    runs-on: ubuntu-latest\n    timeout-minutes: 90$')
         self.assertIn("- cron: '0 12 * * *'", workflow)
         self.assertIn('workflow_dispatch:', workflow)
 

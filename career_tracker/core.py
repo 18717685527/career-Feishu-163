@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TZ = timezone(timedelta(hours=8))
 STAGES = ['邀请投递', '已投递', '待补充简历', '简历筛选', '待笔试', '笔试完成',
           '待面试', '面试完成', '待确认', 'Offer', '已拒绝', '已撤回']
+APPLICATION_STATE_FIELDS = ('stage', 'next_action', 'deadline', 'interview_at')
 
 
 def now():
@@ -108,7 +109,7 @@ def applications(db):
                                stage='待确认', next_action='', deadline=None, interview_at=None)
         app = result[key]
         # Absent updates preserve earlier facts; an explicit null clears obsolete dates.
-        for field in ('stage', 'next_action', 'deadline', 'interview_at'):
+        for field in APPLICATION_STATE_FIELDS:
             if field in e:
                 app[field] = e[field]
         app.update(effective_at=e['effective_at'], evidence=e['evidence'], needs_review=e['needs_review'],
@@ -251,3 +252,4 @@ def ingest(db, result):
         db.executemany('UPDATE messages SET analyzed=1 WHERE id=?', [(i,) for i in ids])
         db.execute('UPDATE batches SET completed=1,result_hash=? WHERE id=?', (signature, result['batch_id']))
     return len(validated)
+

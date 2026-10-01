@@ -41,16 +41,31 @@ SCHEMA = {
 }
 
 
+class ModelOutputError(RuntimeError):
+    """The provider responded, but its assistant content cannot be safely ingested."""
+
+
 def _json_content(value):
     if isinstance(value, list):
-        value = ''.join(part.get('text', '') for part in value if isinstance(part, dict))
+        parts = []
+        for part in value:
+            if not isinstance(part, dict):
+                continue
+            text = part.get('text', '')
+            if not isinstance(text, str):
+                raise ModelOutputError('模型分段文本类型无效')
+            parts.append(text)
+        value = ''.join(parts)
     if not isinstance(value, str):
-        raise RuntimeError('模型未返回文本结果')
+        raise ModelOutputError('模型未返回文本结果')
     value = value.strip()
     if value.startswith('```'):
         value = value.split('\n', 1)[1] if '\n' in value else ''
         value = value.rsplit('```', 1)[0].strip()
-    return json.loads(value)
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        raise ModelOutputError('模型内容不是有效 JSON') from None
 
 
 def endpoint():
@@ -85,6 +100,8 @@ def analyze(batch, api_key):
     except (URLError, TimeoutError, OSError):
         raise RuntimeError('模型网络连接失败；未输出服务端响应内容') from None
     try:
-        return _json_content(result['choices'][0]['message']['content'])
-    except (KeyError, IndexError, TypeError, ValueError):
-        raise RuntimeError('模型未返回可验证的结构化结果') from None
+        content = result['choices'][0]['message']['content']
+    except (KeyError, IndexError, TypeError):
+        raise ModelOutputError('模型响应缺少文本内容') from None
+    return _json_content(content)
+

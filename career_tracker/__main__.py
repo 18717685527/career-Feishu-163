@@ -5,7 +5,8 @@ import sys
 from contextlib import contextmanager
 
 from . import credentials
-from .core import ROOT, applications, connect, get_meta, ingest, now, prepare, save_json, set_meta
+from .core import (APPLICATION_STATE_FIELDS, ROOT, applications, connect, get_meta, ingest, now, prepare,
+                   save_json, set_meta)
 from .feishu import Feishu, initialize, sync
 from .mailbox import backfill, bootstrap, fetch
 
@@ -85,28 +86,39 @@ def run_cycle(db, settings, password, api, max_new, fetcher=fetch):
 
 
 def analyze_and_ingest(db, prepared, api_key, model_analyzer=None, rule_analyzer=None):
-    """Ingest one batch, conservatively falling back only on model schema drift."""
+    """Ingest one batch, falling back on invalid model content or schema."""
     if rule_analyzer is None:
         from .rules import analyze as rule_analyzer
     if not api_key:
         return ingest(db, rule_analyzer(prepared)), False
     if model_analyzer is None:
         from .model import analyze as model_analyzer
+    from .model import ModelOutputError
 
-    # Keep model transport/protocol failures visible. A ValueError here can only
-    # come from ingest's atomic validation of an already parsed model response.
-    modeled = model_analyzer(prepared, api_key)
-    try:
-        return ingest(db, modeled), False
-    except ValueError:
+    def ingest_fallback():
         fallback = rule_analyzer(prepared)
-        marker = '模型结构不符合约定，已用本地规则分析'
+        marker = '模型输出无法通过校验，已用本地规则分析'
         for result in fallback.get('results', []):
             for event in result.get('events', []):
                 event['needs_review'] = True
                 current = str(event.get('review_reason') or '').strip()
                 event['review_reason'] = '；'.join(value for value in (current, marker) if value)
+                # Rule guesses remain review hints, never authoritative state
+                # transitions after a model-output failure.
+                for field in APPLICATION_STATE_FIELDS:
+                    event.pop(field, None)
         return ingest(db, fallback), True
+
+    # Keep model transport and HTTP failures visible. Provider-content and
+    # ingest-validation failures use a conservative, non-transitioning fallback.
+    try:
+        modeled = model_analyzer(prepared, api_key)
+    except ModelOutputError:
+        return ingest_fallback()
+    try:
+        return ingest(db, modeled), False
+    except ValueError:
+        return ingest_fallback()
 
 
 def main():
